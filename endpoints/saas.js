@@ -1,0 +1,486 @@
+const express = require("express");
+const router = express.Router();
+const { PERMISSION_GROUPS } = require("../config/permissions");
+const { syncCompanyConfiguration } = require("../utils/sas.helper");
+const { ObjectId } = require("mongodb");
+
+// Helper para obtener la DB de formsdb (donde están las empresas)
+const getFormsDB = (req) => {
+    return req.mongoClient.db("formsdb");
+};
+
+// Helper para verificar contexto formsdb
+const verifyRequest = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No autorizado" });
+        }
+        const token = authHeader.split(" ")[1];
+
+        // Asegurar que existe una DB conectada para validar
+        // Si req.db no está definido, usamos formsdb por defecto (caso admin directo)
+        let dbToUse = req.db;
+        if (!dbToUse && req.mongoClient) {
+            dbToUse = req.mongoClient.db("formsdb");
+        }
+
+        if (!dbToUse) {
+            console.error("[SAS] Error: No database connection available for token validation");
+            return res.status(500).json({ error: "Configuration Error: No DB connection" });
+        }
+
+        const { validarToken } = require("../utils/validarToken");
+        // Validamos que el token sea válido
+        const validation = await validarToken(dbToUse, token);
+
+        if (!validation.ok) {
+            return res.status(401).json({ error: "Acceso denegado: " + validation.reason });
+        }
+
+        // 2. Verificar que la DB actual sea 'formsdb' (o 'api' en entorno dev si aplica)
+        // Si no venía req.db, asumimos formsdb porque lo forzamos arriba.
+        // Si venía, validamos que sea formsdb.
+        const currentDbName = dbToUse.databaseName;
+        if (currentDbName !== 'formsdb' && currentDbName !== 'api') { // Asumiendo 'api' puede ser el nombre en local
+            return res.status(403).json({ error: `Acceso denegado: Operación no permitida en el contexto '${currentDbName}'. Se requiere 'formsdb'.` });
+        }
+
+        req.user = validation.data; // Retornamos datos de auth por si se usan
+        next();
+    } catch (error) {
+        console.error("Error en verifyRequest:", error);
+        res.status(500).json({ error: "Error interno de autenticación" });
+    }
+};
+
+/**
+ * @openapi
+ * /sas/companies:
+ *   get:
+ *     summary: Listar todas las empresas del ecosistema
+ *     description: Retorna la configuración de todos los tenants, uniendo los datos con sus respectivos planes. Incluye métricas de infraestructura como `sizeOnDisk` (espacio real en base de datos) para cada empresa.
+ *     tags: [SaaS - Infraestructura]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de empresas con estadísticas de uso y almacenamiento.
+ *       403:
+ *         description: Acceso denegado. Solo accesible desde el contexto 'formsdb'.
+ */
+// GET /companies: Listar todas las empresas
+router.get("/companies", verifyRequest, async (req, res) => {
+    console.log(`[SAS] GET /companies request received`);
+    try {
+        // Validación de Seguridad
+        // (Validado por verifyRequest)
+        if (!req.mongoClient) {
+            console.error("[SAS] Error: req.mongoClient is undefined");
+            return res.status(500).json({ error: "Configuration Error: No mongoClient" });
+        }
+
+        const db = getFormsDB(req);
+        console.log(`[SAS] Connected to formsdb, query config_empresas...`);
+
+        // Usar aggregation para unir con Planes
+        const companies = await db.collection("config_empresas").aggregate([
+            {
+                $addFields: {
+                    planIdObj: {
+                        $convert: {
+                            input: "$planId",
+                            to: "objectId",
+                            onError: null,
+                            onNull: null
+                        }
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: "planes",
+                    localField: "planIdObj",
+                    foreignField: "_id",
+                    as: "plan"
+                }
+            },
+            {
+                $unwind: {
+                    path: "$plan",
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $project: {
+                    name: 1,
+                    dbName: 1,
+                    permissions: 1,
+                    planId: 1,
+                    createdAt: 1,
+                    active: 1,
+                    isSystem: 1,
+                    logo: 1, // Si existe
+                    isSuspended: 1,
+                    plan: {
+                        _id: 1,
+                        name: 1,
+                        price: 1
+                    }
+                }
+            }
+        ]).toArray();
+
+        // Inyectar formsdb (principal)
+        const hasFormsDb = companies.some(c => c.dbName === "formsdb");
+        if (!hasFormsDb) {
+            companies.unshift({
+                _id: "formsdb_system", // ID virtual
+                name: "FormsDB (Principal)",
+                dbName: "formsdb",
+                permissions: [],
+                createdAt: new Date(),
+                active: true,
+                isSystem: true
+            });
+        }
+
+        // Ordenar: formsdb primero, luego alfabético
+        companies.sort((a, b) => {
+            if (a.dbName === "formsdb" || a.isSystem) return -1;
+            if (b.dbName === "formsdb" || b.isSystem) return 1;
+            return (a.name || "").localeCompare(b.name || "");
+        });
+
+        console.log(`[SAS] Found ${companies.length} companies`);
+
+        // Enriquecer con el tamaño de la DB
+        const companiesWithStats = await Promise.all(companies.map(async (company) => {
+            if (company.dbName) {
+                try {
+                    const companyDb = req.mongoClient.db(company.dbName);
+                    const stats = await companyDb.stats();
+                    return { ...company, sizeOnDisk: stats.storageSize || 0 }; // storageSize es más preciso para el espacio ocupado
+                } catch (e) {
+                    console.error(`Error fetching stats for ${company.dbName}:`, e.message);
+                    return { ...company, sizeOnDisk: 0 };
+                }
+            }
+            return { ...company, sizeOnDisk: 0 };
+        }));
+
+        res.json(companiesWithStats);
+    } catch (error) {
+        console.error("[SAS] Error al obtener empresas:", error);
+        res.status(500).json({ error: "Error al obtener empresas", details: error.message });
+    }
+});
+
+/**
+ * @openapi
+ * /sas/companies:
+ *   post:
+ *     summary: Crear nueva empresa y desplegar Base de Datos
+ *     description: "Proceso de aprovisionamiento que crea un registro en `config_empresas`, genera un nombre de base de datos único y **clona las colecciones base** (usuarios, roles, forms) desde la DB de 'desarrollo'. Finalmente, sincroniza permisos y límites."
+ *     tags: [SaaS - Infraestructura]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string, example: "Empresa Ejemplo SpA" }
+ *               planId: { type: string, description: "ID del plan a asignar" }
+ *               permissions: { type: array, items: { type: string }, description: "Permisos manuales si no se usa plan" }
+ *     responses:
+ *       201:
+ *         description: Empresa creada e infraestructura desplegada.
+ *       400:
+ *         description: El nombre de la empresa ya existe.
+ */
+// POST /companies: Crear nueva empresa y su base de datos
+router.post("/companies", verifyRequest, async (req, res) => {
+    console.log(`[SAS] POST /companies request received`, req.body);
+    try {
+        // (Validado por verifyRequest)
+        const { name, permissions: bodyPermissions, planId } = req.body;
+        if (!name) return res.status(400).json({ error: "El nombre es requerido" });
+
+        const dbForms = getFormsDB(req);
+
+        // 1. Verificar si ya existe
+        const existing = await dbForms.collection("config_empresas").findOne({ name });
+        if (existing) {
+            console.warn(`[SAS] Company ${name} already exists`);
+            return res.status(400).json({ error: "La empresa ya existe" });
+        }
+
+        // Determinar permisos y límites (Directos vs Plan)
+        let finalPermissions = bodyPermissions || [];
+        let finalPlanLimits = req.body.planLimits || {};
+
+        if (planId) {
+            const plan = await dbForms.collection("planes").findOne({ _id: new ObjectId(planId) });
+            if (plan) {
+                finalPermissions = plan.permissions;
+                finalPlanLimits = plan.planLimits;
+                console.log(`[SAS] Layout initialized from Plan: ${plan.name}`);
+            }
+        }
+
+        // 2. Crear entrada en formsdb.config_empresas
+        const dbName = name.toLowerCase().replace(/[^a-z0-9_]/g, "");
+        console.log(`[SAS] Creating company: ${name}, DB: ${dbName}`);
+
+        const newCompany = {
+            name,
+            dbName,
+            permissions: finalPermissions,
+            planLimits: finalPlanLimits,
+            planId: planId || null,
+            createdAt: new Date(),
+            active: true
+        };
+
+        await dbForms.collection("config_empresas").insertOne(newCompany);
+
+        // 3. Inicializar la nueva Base de Datos clonando de 'desarrollo'
+        console.log(`[SAS] Initializing database: ${dbName} from template 'desarrollo'`);
+        const newDb = req.mongoClient.db(dbName);
+        const templateDb = req.mongoClient.db("desarrollo");
+
+        // 3.1 Colecciones a clonar desde 'desarrollo'
+        const collectionsToClone = [
+            "empresas",
+            "forms",
+            "plantillas",
+            "roles",
+            "usuarios"
+        ];
+
+        for (const colName of collectionsToClone) {
+            try {
+                const data = await templateDb.collection(colName).find().toArray();
+                if (data.length > 0) {
+                    console.log(`[SAS] Cloning ${data.length} documents from ${colName}...`);
+                    await newDb.collection(colName).insertMany(data);
+                } else {
+                    console.log(`[SAS] Collection ${colName} is empty in 'desarrollo'. Creating empty collection.`);
+                    await newDb.createCollection(colName);
+                }
+            } catch (err) {
+                console.error(`[SAS] Error cloning collection ${colName}:`, err.message);
+                // Si falla la clonación, al menos creamos la colección vacía
+                try { await newDb.createCollection(colName); } catch (e) { }
+            }
+        }
+
+        // 3.1.5 AJUSTE MAESTRO: (Manejado en syncCompanyConfiguration)
+
+        // 3.2 y 3.3 Inicializar configuración usando el Helper
+        await syncCompanyConfiguration(req, newCompany, finalPermissions, finalPlanLimits);
+
+        console.log(`[SAS] Company created successfully: ${name}`);
+        res.status(201).json({ message: "Empresa creada exitosamente", company: newCompany });
+
+    } catch (error) {
+        console.error("Error al crear empresa:", error);
+        res.status(500).json({ error: "Error interno al crear empresa", details: error.message });
+    }
+});
+
+/**
+ * @openapi
+ * /sas/companies/{id}:
+ *   put:
+ *     summary: Actualizar configuración o estado de suspensión
+ *     description: "Permite modificar el plan, permisos o suspender el servicio de una empresa. **Nota:** Si `isSuspended` es true, el sistema de roles restringirá automáticamente el acceso de los usuarios de ese tenant."
+ *     tags: [SaaS - Infraestructura]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string }
+ *               planId: { type: string }
+ *               isSuspended: { type: boolean }
+ *               planLimits: { type: object }
+ *     responses:
+ *       200:
+ *         description: Configuración actualizada y base de datos del cliente sincronizada.
+ */
+// PUT /companies/:id: Actualizar permisos de una empresa
+router.put("/companies/:id", verifyRequest, async (req, res) => {
+    console.log(`[SAS] PUT /companies/${req.params.id} request received`, req.body);
+    try {
+        // (Validado por verifyRequest)
+        const { id } = req.params;
+        const { permissions, planId, name, isSuspended } = req.body;
+        const { ObjectId } = require("mongodb");
+
+        const dbForms = getFormsDB(req);
+
+        let query = {};
+        if (ObjectId.isValid(id)) {
+            query = { _id: new ObjectId(id) };
+        } else {
+            query = { name: id };
+        }
+
+        const company = await dbForms.collection("config_empresas").findOne(query);
+        if (!company) {
+            return res.status(404).json({ error: "Empresa no encontrada" });
+        }
+
+        // Determinar nuevos valores
+        let newPermissions = permissions;
+        let newPlanLimits = req.body.planLimits;
+        let newPlanId = planId;
+        // Si no se envía isSuspended, se mantiene el valor actual
+        let newIsSuspended = isSuspended !== undefined ? isSuspended : company.isSuspended;
+
+        // Si se asigna un Plan, sobrescribimos valores
+        if (planId && planId !== company.planId) {
+            const plan = await dbForms.collection("planes").findOne({ _id: new ObjectId(planId) });
+            if (plan) {
+                newPermissions = plan.permissions;
+                newPlanLimits = plan.planLimits;
+                console.log(`[SAS] Applying Plan '${plan.name}' to company ${company.name}`);
+            }
+        }
+
+        // 1. Actualizar config_empresas
+        const updateData = {};
+        if (newPermissions !== undefined) updateData.permissions = newPermissions;
+        if (newPlanLimits !== undefined) updateData.planLimits = newPlanLimits;
+        if (newPlanId !== undefined) updateData.planId = newPlanId;
+        if (name) updateData.name = name;
+        if (newIsSuspended !== undefined) updateData.isSuspended = newIsSuspended;
+
+        await dbForms.collection("config_empresas").updateOne(query, {
+            $set: updateData
+        });
+
+        // Agregamos el estado actualizado al objeto de la empresa para la sincronización
+        company.isSuspended = newIsSuspended;
+
+        // 2. Sincronizar DB del cliente
+        await syncCompanyConfiguration(req, company, newPermissions, newPlanLimits);
+
+        res.json({ message: "Empresa actualizada exitosamente" });
+
+    } catch (error) {
+        console.error("Error al actualizar empresa:", error);
+        res.status(500).json({ error: "Error interno al actualizar empresa", details: error.message });
+    }
+});
+
+/**
+ * @openapi
+ * /sas/companies/{id}:
+ *   delete:
+ *     summary: Eliminar empresa y destruir Base de Datos
+ *     description: "**Operación Irreversible.** Elimina el registro de configuración y ejecuta un `dropDatabase()` sobre la base de datos física del cliente. Está protegido contra la eliminación de 'formsdb'."
+ *     tags: [SaaS - Infraestructura]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Empresa y datos eliminados permanentemente.
+ *       403:
+ *         description: Intento de eliminar base de datos del sistema.
+ */
+// DELETE /companies/:id: Eliminar empresa y su DB
+router.delete("/companies/:id", verifyRequest, async (req, res) => {
+    try {
+        // (Validado por verifyRequest)
+        const { id } = req.params;
+        // id es el _id de la colección config_empresas. 
+        // Pero necesitamos el nombre para borrar la DB.
+
+        const dbForms = getFormsDB(req);
+        const { ObjectId } = require("mongodb");
+
+        let query = {};
+        try {
+            query = { _id: new ObjectId(id) };
+        } catch (e) {
+            query = { _id: id }; // Fallback si es string custom
+        }
+
+        const company = await dbForms.collection("config_empresas").findOne(query);
+
+        if (!company) {
+            return res.status(404).json({ error: "Empresa no encontrada" });
+        }
+
+        // PROTECCIÓN: No permitir borrar formsdb
+        if (company.dbName === "formsdb" || company.isSystem) {
+            return res.status(403).json({ error: "No se puede eliminar la base de datos principal del sistema." });
+        }
+
+        // 1. Eliminar la base de datos física primero
+        if (company.dbName) {
+            console.log(`[SAS] Dropping database: ${company.dbName}`);
+            const dbDrop = req.mongoClient.db(company.dbName);
+            await dbDrop.dropDatabase();
+        }
+
+        // 2. Eliminar de config_empresas después
+        await dbForms.collection("config_empresas").deleteOne(query);
+
+        res.json({ message: "Empresa y base de datos eliminadas" });
+
+    } catch (error) {
+        console.error("Error al eliminar empresa:", error);
+        res.status(500).json({ error: "Error al eliminar empresa" });
+    }
+});
+
+// GET /companies/:id: Obtener detalles de una empresa (incluyendo planLimits)
+router.get("/companies/:id", verifyRequest, async (req, res) => {
+    try {
+        // (Validado por verifyRequest)
+        const { id } = req.params;
+        const dbForms = getFormsDB(req);
+        const { ObjectId } = require("mongodb");
+
+        let query = {};
+        if (ObjectId.isValid(id)) {
+            query = { _id: new ObjectId(id) };
+        } else {
+            query = { name: id };
+        }
+
+        const company = await dbForms.collection("config_empresas").findOne(query);
+
+        if (!company) {
+            return res.status(404).json({ error: "Empresa no encontrada" });
+        }
+
+        res.json(company);
+
+    } catch (error) {
+        console.error("Error al obtener detalles de empresa:", error);
+        res.status(500).json({ error: "Error al obtener detalles de empresa" });
+    }
+});
+
+module.exports = router;

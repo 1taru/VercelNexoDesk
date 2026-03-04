@@ -1,0 +1,472 @@
+const {
+   getActor,
+   encryptObject,
+   decryptObject,
+   formatActor,
+   formatEncriptedName,
+   formatName,
+   buildCargoChangesMetadata
+} = require("./registerEvent.helper.js");
+const { encrypt, decrypt } = require("../utils/seguridad.helper");
+
+async function registerEvent(req, auth, event, metadata = {}, descriptionBuilder = null, actorOverride = null) {
+   const actor = actorOverride ?? (await getActor(req, auth));
+
+   const description = typeof descriptionBuilder === "function" ? descriptionBuilder(actor) || "" : event?.description;
+   const finalDescription =
+      typeof description === "string" && description.trim() !== "" && !description.includes(":")
+         ? encrypt(description)
+         : description;
+
+   const payload = {
+      ...event,
+      actor,
+      description: finalDescription,
+      metadata: metadata && Object.keys(metadata).length ? encryptObject(metadata) : metadata,
+      createdAt: new Date(),
+   };
+
+   const collection = req.db.collection("cambios");
+   const result = await collection.insertOne(payload);
+
+   if (!result.insertedId) {
+      throw new Error("Error al registrar evento");
+   }
+}
+
+async function registerSolicitudCreationEvent(req, auth, description = "", metadata = {}) {
+   const payload = {
+      code: CODES.SOLICITUD_CREACION,
+      target: {
+         type: TARGET_TYPES.SOLICITUD,
+      },
+      description,
+   };
+
+   await registerEvent(req, auth, payload, metadata);
+}
+
+async function registerSolicitudRemovedEvent(req, auth, deletedRespuesta = {}) {
+   const titleDecripted = decrypt(deletedRespuesta?.formTitle);
+   const nameDecripted = decrypt(deletedRespuesta?.user?.nombre);
+   const empresaDecripted = decrypt(deletedRespuesta?.user?.empresa);
+   const emailDecripted = decrypt(deletedRespuesta?.user?.mail);
+
+   const metadata = {
+      respuesta_eliminada: {
+         titulo: titleDecripted,
+         usuario: {
+            nombre: nameDecripted,
+            empresa: empresaDecripted,
+            email: emailDecripted,
+         },
+      },
+   };
+
+   const descriptionBuilder = (actor) =>
+      `${formatActor(actor)} eliminó la solicitud ${titleDecripted} respondida por ${nameDecripted} de la empresa ${empresaDecripted}`;
+
+   const payload = {
+      code: CODES.SOLICITUD_ELIMINACION,
+      target: {
+         type: TARGET_TYPES.SOLICITUD,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerTicketCreationEvent(req, auth, description = "", metadata = {}) {
+   const payload = {
+      code: CODES.TICKET_CREACION,
+      target: {
+         type: TARGET_TYPES.TICKET,
+      },
+      description,
+   };
+
+   await registerEvent(req, auth, payload, metadata);
+}
+
+async function registerTicketRemovedEvent(req, auth, deletedTicket = {}) {
+   const metadata = {
+      ticket_eliminado: {
+         titulo: deletedTicket?.formTitle,
+         email: deletedTicket?.mail,
+         estado: deletedTicket?.status,
+         categoria: deletedTicket?.category,
+         origen: deletedTicket?.origin,
+         fecha_de_creacion: deletedTicket?.createdAt,
+      },
+   };
+   const descriptionBuilder = (actor) => {
+      const itsMyTicket = actor?._id?.toString() === deletedTicket?.user?.uid?.toString();
+      if (itsMyTicket) {
+         return `${formatActor(actor)} eliminó su propio ticket`;
+      }
+      return `${formatActor(actor)} eliminó un ticket de ${deletedTicket?.user?.nombre} de la empresa ${deletedTicket?.user?.empresa}`;
+   };
+   const payload = {
+      code: CODES.TICKET_ELIMINACION,
+      target: {
+         type: TARGET_TYPES.TICKET,
+      },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerDomicilioVirtualRemovalEvent(req, auth, deletedDomicilioVirtual = {}) {
+   const { formTitle } = deletedDomicilioVirtual;
+   const metadata = {
+      solicitud_eliminada: {
+         titulo: formTitle,
+         estado: deletedDomicilioVirtual?.status,
+         respuestas: decryptObject(deletedDomicilioVirtual?.responses),
+         fecha_de_creacion: deletedDomicilioVirtual?.createdAt,
+      },
+   };
+
+   const descriptionBuilder = (actor) =>
+      `${formatActor(actor)} eliminó una solicitud tipo "${formTitle}" de domicilio virtual`;
+   const payload = {
+      code: CODES.DOMICILIOV_ELIMINACION,
+      target: {
+         type: TARGET_TYPES.SOLICITUD,
+      },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerUserUpdateEvent(req, auth, profileData = {}) {
+   const { nombre, apellido, mail, empresa, cargo, rol, estado } = profileData;
+   const metadata = { Usuario: { nombre, apellido, mail, empresa, cargo, rol, estado } };
+
+   const descriptionBuilder = (actor) => {
+      const actorMail = decrypt(actor?.email)?.toLowerCase().trim();
+      const myMail = mail?.toLowerCase().trim();
+      const itsMyProfile = actorMail && myMail && actorMail === myMail;
+
+      if (itsMyProfile) {
+         return `${formatActor(actor)} actualizó su perfil de usuario`;
+      }
+
+      return `${formatActor(actor)} actualizó el perfil de usuario de ${formatName(nombre, apellido)}`;
+   };
+
+   const payload = {
+      code: CODES.USUARIO_ACTUALIZACION,
+      target: {
+         type: TARGET_TYPES.USUARIO,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerUserCreationEvent(req, auth, profileData = {}) {
+   const { nombre, apellido, mail, empresa, cargo, rol, estado } = profileData;
+   const metadata = { Usuario: { nombre, apellido, mail, empresa, cargo, rol, estado } };
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} creó el usuario de ${formatName(nombre, apellido)}`;
+
+   const payload = {
+      code: CODES.USUARIO_CREACION,
+      target: {
+         type: TARGET_TYPES.USUARIO,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerUserRemovedEvent(req, auth, deletedUser = {}) {
+   const { nombre, apellido, mail, empresa, cargo, rol, estado } = deletedUser;
+
+   const nameDecrypted = decrypt(nombre);
+   const lastNameDecrypted = decrypt(apellido);
+
+   const metadata = {
+      usuario_eliminado: {
+         nombre: nameDecrypted,
+         apellido: lastNameDecrypted,
+         email: decrypt(mail),
+         empresa: decrypt(empresa),
+         cargo: decrypt(cargo),
+         rol,
+         estado,
+      },
+   };
+
+   const descriptionBuilder = (actor) =>
+      `${formatActor(actor)} eliminó al usuario ${formatName(nameDecrypted, lastNameDecrypted)}`;
+
+   const payload = {
+      code: CODES.USUARIO_ELIMINACION,
+      target: {
+         type: TARGET_TYPES.USUARIO,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerEmpresaCreationEvent(req, auth, empresaData = {}) {
+   const { nombre, rut, direccion, encargado, rut_encargado } = empresaData;
+   const metadata = { Empresa: { nombre, rut, direccion, encargado, rut_encargado } };
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} registró la empresa ${nombre}`;
+
+   const payload = {
+      code: CODES.EMPRESA_CREACION,
+      target: {
+         type: TARGET_TYPES.EMPRESA,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerEmpresaUpdateEvent(req, auth, empresaData = {}) {
+   const { nombre, rut, direccion, encargado, rut_encargado } = empresaData;
+   const metadata = { Empresa: { nombre, rut, direccion, encargado, rut_encargado } };
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} actualizó la información de la empresa ${nombre}`;
+
+   const payload = {
+      code: CODES.EMPRESA_ACTUALIZACION,
+      target: {
+         type: TARGET_TYPES.EMPRESA,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerEmpresaRemovedEvent(req, auth, deletedEmpresa = {}) {
+   const { nombre, rut, direccion, encargado, rut_encargado, createdAt } = deletedEmpresa;
+   const nombreDecripted = decrypt(nombre);
+   const metadata = {
+      empresa_eliminada: {
+         nombre: nombreDecripted,
+         rut: decrypt(rut),
+         direccion: decrypt(direccion),
+         encargado: decrypt(encargado),
+         rut_encargado: decrypt(rut_encargado),
+         fecha_de_creacion: decrypt(createdAt),
+      },
+   };
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} eliminó la empresa ${nombreDecripted}`;
+   const payload = {
+      code: CODES.EMPRESA_ELIMINACION,
+      target: {
+         type: TARGET_TYPES.EMPRESA,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerUserPasswordChange(req, userData) {
+   const actorOverride = {
+      uid: userData?._id?.toString() || null,
+      name: userData?.nombre || "desconocido",
+      last_name: userData?.apellido || "desconocido",
+      role: userData?.rol || "desconocido",
+      email: userData?.mail || "desconocido",
+      empresa: userData?.empresa || "desconocido",
+      cargo: userData?.cargo || "desconocido",
+      estado: userData?.estado || "desconocido",
+   };
+
+   const description = `${formatName(userData?.nombre, userData?.apellido)} de la empresa ${userData?.empresa} cambió su contraseña`;
+
+   const payload = {
+      code: CODES.USUARIO_CAMBIO_CONTRASEÑA,
+      target: {
+         type: TARGET_TYPES.USUARIO,
+      },
+      description,
+   };
+
+   await registerEvent(req, null, payload, {}, null, actorOverride);
+}
+
+async function registerCargoCreationEvent(req, auth, cargoData) {
+   const { name, description, permissions } = cargoData;
+   const metadata = { Cargo: { Nombre: name, Descripcion: description, Permisos: permissions } };
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} ha creado el cargo "${name}"`;
+
+   const payload = {
+      code: CODES.CARGO_CREACION,
+      target: {
+         type: TARGET_TYPES.CARGO,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerCargoUpdateEvent(req, auth, currentCargoState = {}, newCargoState = {}) {
+
+   let metadata = buildCargoChangesMetadata(currentCargoState, newCargoState);
+
+   if (!metadata) metadata = {}
+
+   const descriptionBuilder = (actor) => `${formatActor(actor)} actualizó el cargo "${currentCargoState.name}"`;
+
+   const payload = {
+      code: CODES.CARGO_ACTUALIZACION,
+      target: {
+         type: TARGET_TYPES.CARGO,
+      },
+   };
+
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+
+}
+
+// --- FORMULARIO ---
+
+async function registerFormCreationEvent(req, auth, formData = {}) {
+   const { title, section, status } = formData;
+   const metadata = { Formulario: { titulo: title, seccion: section, estado: status || 'borrador' } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} creó el formulario "${title}"`;
+   const payload = {
+      code: CODES.FORMULARIO_CREACION,
+      target: { type: TARGET_TYPES.FORMULARIO },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerFormUpdateEvent(req, auth, formData = {}) {
+   const { title, section } = formData;
+   const metadata = { Formulario: { titulo: title, seccion: section } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} modificó el formulario "${title}"`;
+   const payload = {
+      code: CODES.FORMULARIO_ACTUALIZACION,
+      target: { type: TARGET_TYPES.FORMULARIO },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerFormPublishEvent(req, auth, formData = {}) {
+   const { title, section } = formData;
+   const metadata = { Formulario: { titulo: title, seccion: section, estado: 'publicado' } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} publicó el formulario "${title}"`;
+   const payload = {
+      code: CODES.FORMULARIO_PUBLICACION,
+      target: { type: TARGET_TYPES.FORMULARIO },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerFormDeletionEvent(req, auth, formData = {}) {
+   const { title, section } = formData;
+   const metadata = { Formulario_eliminado: { titulo: title, seccion: section } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} eliminó el formulario "${title}"`;
+   const payload = {
+      code: CODES.FORMULARIO_ELIMINACION,
+      target: { type: TARGET_TYPES.FORMULARIO },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+// --- PLANTILLA ---
+
+async function registerPlantillaCreationEvent(req, auth, plantillaData = {}) {
+   const { documentTitle, formId } = plantillaData;
+   const nombre = documentTitle || 'sin nombre';
+   const metadata = { Plantilla: { nombre, formulario_id: formId } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} creó la plantilla "${nombre}"`;
+   const payload = {
+      code: CODES.PLANTILLA_CREACION,
+      target: { type: TARGET_TYPES.PLANTILLA },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerPlantillaUpdateEvent(req, auth, plantillaData = {}) {
+   const { documentTitle, formId } = plantillaData;
+   const nombre = documentTitle || 'sin nombre';
+   const metadata = { Plantilla: { nombre, formulario_id: formId } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} modificó la plantilla "${nombre}"`;
+   const payload = {
+      code: CODES.PLANTILLA_ACTUALIZACION,
+      target: { type: TARGET_TYPES.PLANTILLA },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+async function registerPlantillaDeletionEvent(req, auth, plantillaData = {}) {
+   const { documentTitle, formId } = plantillaData;
+   const nombre = documentTitle || 'sin nombre';
+   const metadata = { Plantilla_eliminada: { nombre, formulario_id: formId } };
+   const descriptionBuilder = (actor) => `${formatActor(actor)} eliminó la plantilla "${nombre}"`;
+   const payload = {
+      code: CODES.PLANTILLA_ELIMINACION,
+      target: { type: TARGET_TYPES.PLANTILLA },
+   };
+   await registerEvent(req, auth, payload, metadata, descriptionBuilder);
+}
+
+// codes
+const CODES = {
+   SOLICITUD_CREACION: "SOLICITUD_CREACION",
+   SOLICITUD_ELIMINACION: "SOLICITUD_ELIMINACION",
+   TICKET_CREACION: "TICKET_CREACION",
+   TICKET_ELIMINACION: "TICKET_ELIMINACION",
+   DOMICILIOV_ELIMINACION: "DOMICILIOV_ELIMINACION",
+   USUARIO_CREACION: "USUARIO_CREACION",
+   USUARIO_ACTUALIZACION: "USUARIO_ACTUALIZACION",
+   USUARIO_ELIMINACION: "USUARIO_ELIMINACION",
+   USUARIO_CAMBIO_CONTRASEÑA: "USUARIO_CAMBIO_CONTRASEÑA",
+   EMPRESA_CREACION: "EMPRESA_CREACION",
+   EMPRESA_ACTUALIZACION: "EMPRESA_ACTUALIZACION",
+   EMPRESA_ELIMINACION: "EMPRESA_ELIMINACION",
+   CARGO_CREACION: "CARGO_CREACION",
+   CARGO_ACTUALIZACION: "CARGO_ACTUALIZACION",
+   FORMULARIO_CREACION: "FORMULARIO_CREACION",
+   FORMULARIO_ACTUALIZACION: "FORMULARIO_ACTUALIZACION",
+   FORMULARIO_PUBLICACION: "FORMULARIO_PUBLICACION",
+   FORMULARIO_ELIMINACION: "FORMULARIO_ELIMINACION",
+   PLANTILLA_CREACION: "PLANTILLA_CREACION",
+   PLANTILLA_ACTUALIZACION: "PLANTILLA_ACTUALIZACION",
+   PLANTILLA_ELIMINACION: "PLANTILLA_ELIMINACION",
+};
+
+// target types
+const TARGET_TYPES = {
+   SOLICITUD: "Solicitud",
+   TICKET: "Ticket",
+   USUARIO: "Usuario",
+   EMPRESA: "Empresa",
+   CARGO: "Cargo",
+   FORMULARIO: "Formulario",
+   PLANTILLA: "Plantilla",
+};
+
+module.exports = {
+   registerSolicitudCreationEvent,
+   registerTicketCreationEvent,
+   registerSolicitudRemovedEvent,
+   registerTicketRemovedEvent,
+   registerDomicilioVirtualRemovalEvent,
+   registerUserUpdateEvent,
+   registerUserCreationEvent,
+   registerUserRemovedEvent,
+   registerEmpresaCreationEvent,
+   registerEmpresaUpdateEvent,
+   registerEmpresaRemovedEvent,
+   registerUserPasswordChange,
+   registerCargoCreationEvent,
+   registerCargoUpdateEvent,
+   registerFormCreationEvent,
+   registerFormUpdateEvent,
+   registerFormPublishEvent,
+   registerFormDeletionEvent,
+   registerPlantillaCreationEvent,
+   registerPlantillaUpdateEvent,
+   registerPlantillaDeletionEvent,
+};
