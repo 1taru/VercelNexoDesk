@@ -22,7 +22,7 @@ const verifyRequest = async (req, res, next) => {
         // Si req.db no está definido, usamos formsdb por defecto (caso admin directo)
         let dbToUse = req.db;
         if (!dbToUse && req.mongoClient) {
-            dbToUse = req.mongoClient.db("formsdb");
+            dbToUse = req.mongoClient.db("main");
         }
 
         if (!dbToUse) {
@@ -38,15 +38,7 @@ const verifyRequest = async (req, res, next) => {
             return res.status(401).json({ error: "Acceso denegado: " + validation.reason });
         }
 
-        // 2. Verificar que la DB actual sea 'formsdb' (o 'api' en entorno dev si aplica)
-        // Si no venía req.db, asumimos formsdb porque lo forzamos arriba.
-        // Si venía, validamos que sea formsdb.
-        const currentDbName = dbToUse.databaseName;
-        if (currentDbName !== 'formsdb' && currentDbName !== 'api') { // Asumiendo 'api' puede ser el nombre en local
-            return res.status(403).json({ error: `Acceso denegado: Operación no permitida en el contexto '${currentDbName}'. Se requiere 'formsdb'.` });
-        }
-
-        req.user = validation.data; // Retornamos datos de auth por si se usan
+        req.user = validation.data;
         next();
     } catch (error) {
         console.error("Error en verifyRequest:", error);

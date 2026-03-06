@@ -217,7 +217,6 @@ router.get("/", async (req, res) => {
             nombre: decrypt(u.nombre),
             apellido: decrypt(u.apellido),
             cargo: cargoDescifrado,
-            empresa: decrypt(u.empresa),
             mail: decrypt(u.mail),
             rol: rolDescifrado
          };
@@ -250,7 +249,6 @@ router.get("/solicitud", async (req, res) => {
             nombre: decrypt(usr.nombre),
             apellido: decrypt(usr.apellido),
             correo: decrypt(usr.mail),
-            empresa: decrypt(usr.empresa),
             cargo: cargo,
             rol: usr.rol
          };
@@ -367,8 +365,6 @@ router.get("/:mail", async (req, res) => {
       }
 
       res.json({
-         id: usr._id,
-         empresa: decrypt(usr.empresa),
          cargo: decrypt(usr.cargo || usr.rol),
       });
    } catch (err) {
@@ -433,7 +429,6 @@ router.get("/full/:mail", async (req, res) => {
          nombre: decrypt(usr.nombre),
          apellido: decrypt(usr.apellido),
          mail: decrypt(usr.mail),
-         empresa: decrypt(usr.empresa),
          cargo: decrypt(usr.cargo),
          rol: usr.rol,
          notificaciones: usr.notificaciones,
@@ -1408,43 +1403,42 @@ router.post("/register", async (req, res) => {
       if (!auth.ok) {
          return res.status(403).json({ error: auth.error });
       }
-      const { nombre, apellido, mail, empresa, cargo, rol, estado } = req.body;
+      const { nombre, apellido, mail, cargo, estado } = req.body;
       const m = mail.toLowerCase().trim();
 
       const isRequesterMaestro = auth.data.rol?.toLowerCase() === "maestro";
       const userLevel = await getRoleLevel(req.db, auth.data.rol);
       const targetLevel = await getRoleLevel(req.db, cargo);
-
+      /*
       if (targetLevel > userLevel) {
          return res.status(403).json({ error: `No tienes jerarquía suficiente para asignar un nivel de rol ${targetLevel}. Tu máximo es ${userLevel}.` });
       }
-
+ 
       if ((cargo?.toLowerCase() === "maestro" || rol?.toLowerCase() === "maestro") && !isRequesterMaestro) {
          return res.status(403).json({ error: "No tienes permisos para crear usuarios Maestro." });
       }
-
+*/
       if (await req.db.collection("usuarios").findOne({ mail_index: createBlindIndex(m) })) {
          return res.status(400).json({ error: "El usuario ya existe" });
       }
 
       // PLAN LIMITES USUARIOS
+      /*
       const { checkPlanLimits } = require("../utils/planLimits");
       try {
          await checkPlanLimits(req, 'users', { empresa });
       } catch (limitErr) {
          return res.status(403).json({ error: limitErr.message });
       }
-
+*/
       const newUser = {
          nombre: encrypt(nombre),
          apellido: encrypt(apellido),
          mail: encrypt(m),
          mail_index: createBlindIndex(m),
-         empresa: encrypt(empresa),
          cargo: encrypt(cargo),
-         rol,
          pass: "",
-         estado: estado || "pendiente",
+         estado: "pendiente",
          twoFactorEnabled: false,
          createdAt: new Date().toISOString(),
          updatedAt: new Date().toISOString(),
@@ -1453,7 +1447,6 @@ router.post("/register", async (req, res) => {
       const result = await req.db.collection("usuarios").insertOne(newUser);
       const userId = result.insertedId.toString();
 
-      // --- NOTIFICACIÓN Y EMAIL ---
 
       // 1. Notificación en DB
       await addNotification(req.db, {
@@ -1476,8 +1469,7 @@ router.post("/register", async (req, res) => {
                      style="background-color: #3B82F6; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
                      Configurar mi Contraseña
                   </a>
-               </div>
-               <p style="font-size: 12px; color: #666;">Empresa: ${req.nombreEmpresa}</p>
+               <div style="text-align: center; margin: 30px 0;">
                <p>© ${new Date().getFullYear()} Plataforma Acciona.</p>
 
             </div>`;
@@ -1523,13 +1515,14 @@ router.put("/users/:id", async (req, res) => {
       if (!auth.ok) {
          return res.status(403).json({ error: auth.error });
       }
-      const { nombre, apellido, mail, empresa, cargo, rol, estado } = req.body;
+      const { nombre, apellido, mail, cargo, rol, estado } = req.body;
       const userId = req.params.id;
 
       const isRequesterMaestro = auth.data.rol?.toLowerCase() === "maestro";
       const userLevel = await getRoleLevel(req.db, auth.data.rol);
       const targetLevel = await getRoleLevel(req.db, cargo);
 
+      /*
       if (targetLevel > userLevel) {
          return res.status(403).json({ error: `No tienes jerarquía suficiente para asignar un nivel de rol ${targetLevel}. Tu máximo es ${userLevel}.` });
       }
@@ -1538,8 +1531,9 @@ router.put("/users/:id", async (req, res) => {
       if ((cargo?.toLowerCase() === "maestro" || rol?.toLowerCase() === "maestro") && !isRequesterMaestro) {
          return res.status(403).json({ error: "No tienes permisos para asignar el rol Maestro." });
       }
+      */
 
-      if (!nombre || !apellido || !mail || !empresa || !cargo || !rol) {
+      if (!nombre || !apellido || !mail || !cargo || !rol) {
          return res.status(400).json({ error: "Todos los campos son obligatorios" });
       }
 
@@ -1568,6 +1562,7 @@ router.put("/users/:id", async (req, res) => {
          console.warn("Error descifrando cargo en validación PUT:", e);
       }
 
+      /*
       if (currentCargo?.toLowerCase() === "maestro" && !isRequesterMaestro) {
          return res.status(403).json({ error: "No tienes permisos para editar usuarios Maestro." });
       }
@@ -1576,13 +1571,13 @@ router.put("/users/:id", async (req, res) => {
       if (currentLevel > userLevel) {
          return res.status(403).json({ error: "No tienes jerarquía para editar a un usuario con un nivel de rol superior al tuyo." });
       }
+      */
 
       const updateData = {
          nombre: encrypt(nombre),
          apellido: encrypt(apellido),
          mail: encrypt(userEmail),
          mail_index: mailIndex,
-         empresa: encrypt(empresa),
          cargo: encrypt(cargo),
          rol,
          estado,
@@ -2014,56 +2009,15 @@ router.get("/empresas/todas", async (req, res) => {
          return res.status(403).json({ error: auth.error });
       }
 
-      const empresas = await req.db.collection("empresas").find().toArray();
+      const empresas = await req.db.collection("config_empresas").find().toArray();
 
       const empresasDescifradas = empresas.map((emp) => {
          // Descifrar campos de texto
          const empresaDescifrada = {
             _id: emp._id,
-            nombre: safeDecrypt(emp.nombre),
+            nombre: safeDecrypt(emp.name),
             rut: safeDecrypt(emp.rut),
-            direccion: safeDecrypt(emp.direccion),
-            encargado: safeDecrypt(emp.encargado),
-            rut_encargado: safeDecrypt(emp.rut_encargado),
-            createdAt: emp.createdAt,
-            updatedAt: emp.updatedAt,
-            logo: null,
          };
-
-         // Si tiene logo, procesarlo
-         if (emp.logo && emp.logo.fileData) {
-            try {
-               // El fileData está cifrado como Base64, necesitamos descifrarlo
-               const fileDataDescifrado = decrypt(emp.logo.fileData);
-
-               empresaDescifrada.logo = {
-                  fileName: emp.logo.fileName,
-                  fileData: fileDataDescifrado, // Base64 descifrado
-                  fileSize: emp.logo.fileSize,
-                  mimeType: emp.logo.mimeType,
-                  uploadedAt: emp.logo.uploadedAt,
-               };
-            } catch (error) {
-               console.error("Error procesando logo para empresa", emp._id, error);
-               // Mantener metadata pero sin fileData
-               empresaDescifrada.logo = {
-                  fileName: emp.logo.fileName,
-                  fileSize: emp.logo.fileSize,
-                  mimeType: emp.logo.mimeType,
-                  uploadedAt: emp.logo.uploadedAt,
-                  error: "No se pudo descifrar",
-               };
-            }
-         } else if (emp.logo) {
-            // Si hay logo metadata pero no fileData (por si acaso)
-            empresaDescifrada.logo = {
-               fileName: emp.logo.fileName,
-               fileSize: emp.logo.fileSize,
-               mimeType: emp.logo.mimeType,
-               uploadedAt: emp.logo.uploadedAt,
-               note: "Sin datos de imagen",
-            };
-         }
 
          return empresaDescifrada;
       });

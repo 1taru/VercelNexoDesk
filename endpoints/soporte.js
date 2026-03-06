@@ -4,7 +4,6 @@ const { ObjectId } = require("mongodb");
 const multer = require('multer');
 const { addNotification } = require("../utils/notificaciones.helper.js");
 const { generarAnexoDesdeRespuesta } = require("../utils/generador.helper.js");
-const { enviarCorreoRespaldo } = require("../utils/mailrespaldo.helper.js");
 const { validarToken } = require("../utils/validarToken.js");
 const { createBlindIndex, verifyPassword, decrypt } = require("../utils/seguridad.helper.js");
 const { sendEmail } = require("../utils/mail.helper.js");
@@ -217,15 +216,9 @@ const generarContenidoCorreoRespaldo = (formTitle, usuario, fecha, responses, qu
   };
 
   // Descifrar datos del usuario si están cifrados
-  let nombreUsuarioDescifrado = usuario.nombre;
-  let empresaDescifrada = usuario.empresa;
-
   try {
     if (usuario.nombre && usuario.nombre.includes(':')) {
       nombreUsuarioDescifrado = decrypt(usuario.nombre);
-    }
-    if (usuario.empresa && usuario.empresa.includes(':')) {
-      empresaDescifrada = decrypt(usuario.empresa);
     }
   } catch (error) {
     console.error('Error descifrando datos del usuario para correo:', error);
@@ -243,7 +236,6 @@ const generarContenidoCorreoRespaldo = (formTitle, usuario, fecha, responses, qu
 INFORMACIÓN GENERAL:
 -------------------
 Trabajador: ${nombreTrabajador}
-Empresa: ${empresaDescifrada}
 Respondido por: ${nombreUsuarioDescifrado}
 Fecha y hora: ${fecha}
 
@@ -263,7 +255,6 @@ Generado el: ${fecha}
   <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #3498db;">
     <h3 style="color: #2c3e50; margin-top: 0;">INFORMACIÓN GENERAL</h3>
     <p><strong>Trabajador:</strong> ${nombreTrabajador}</p>
-    <p><strong>Empresa:</strong> ${empresaDescifrada}</p>
     <p><strong>Respondido por:</strong> ${nombreUsuarioDescifrado}</p>
     <p><strong>Fecha y hora:</strong> ${fecha}</p>
   </div>
@@ -340,23 +331,10 @@ router.post("/", uploadMultiple.array('adjuntos'), async (req, res) => {
       return res.status(401).json({ error: tokenValido.reason });
     }
 
-    // Descifrar empresa si está cifrada
-    let empresaDescifrada = empresa;
-    if (empresa && empresa.includes(':')) {
-      empresaDescifrada = decrypt(empresa);
-    }
-
     let form = null;
     if (ObjectId.isValid(formId)) {
       form = await req.db.collection("forms").findOne({ _id: new ObjectId(formId) });
       if (!form) return res.status(404).json({ error: "Formulario no encontrado" });
-
-      // Las empresas en 'form.companies' probablemente están en texto plano o son ObjectIds
-      const empresaAutorizada = form.companies?.includes(empresaDescifrada) ||
-        form.companies?.includes("Todas");
-      if (!empresaAutorizada) {
-        return res.status(403).json({ error: `La empresa ${empresaDescifrada} no está autorizada.` });
-      }
     } else {
       console.log(`Ticket creado`);
     }
@@ -465,7 +443,7 @@ router.post("/", uploadMultiple.array('adjuntos'), async (req, res) => {
     // Descifrar nombre para notificaciones si está cifrado
     let nombreUsuarioDescifrado = usuario?.nombre || 'Usuario';  // ← SOLO CAMBIA ESTA LÍNEA
 
-    const message = `${nombreUsuarioDescifrado} de la empresa ${empresaDescifrada} ha levantado un ticket de tickets.`;
+    const message = `${nombreUsuarioDescifrado} ha levantado un ticket de tickets.`;
     const notifData = {
       titulo: message,
       descripcion: adjuntosFiles.length > 0 ? `Incluye ${adjuntosFiles.length} archivo(s)` : "Revisar en panel.",
@@ -490,7 +468,6 @@ router.post("/", uploadMultiple.array('adjuntos'), async (req, res) => {
     try {
       await generarAnexoDesdeRespuesta(responses, result.insertedId.toString(), req.db, form?.section || "Soporte General", {
         nombre: usuario,
-        empresa: empresa, // Pasar empresa cifrada para que generador.helper la descifre
         uid: userId,
       }, formId, formTitle);
     } catch (error) {
@@ -721,9 +698,6 @@ router.get("/", async (req, res) => {
           }
           if (answerCopy.user.mail && answerCopy.user.mail.includes(':')) {
             answerCopy.user.mail = decrypt(answerCopy.user.mail);
-          }
-          if (answerCopy.user.empresa && answerCopy.user.empresa.includes(':')) {
-            answerCopy.user.empresa = decrypt(answerCopy.user.empresa);
           }
           if (answerCopy.user.cargo && answerCopy.user.cargo.includes(':')) {
             answerCopy.user.cargo = decrypt(answerCopy.user.cargo);

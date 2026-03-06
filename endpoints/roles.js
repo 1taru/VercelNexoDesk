@@ -5,6 +5,7 @@ const { validarToken } = require("../utils/validarToken.js");
 const { registerCargoCreationEvent, registerCargoUpdateEvent } = require("../utils/registerEvent");
 const { decrypt, encrypt, encryptArray } = require("../utils/seguridad.helper");
 const { getRoleLevel } = require("../utils/role.helper");
+const { PERMISSION_GROUPS } = require("../config/permissions");
 
 /**
  * Filtra los permisos de los roles si la empresa asociada está suspendida.
@@ -83,16 +84,16 @@ router.post("/", async (req, res) => {
 
       const { id, name, description, permissions, color, level } = req.body;
 
-      const userRoleLevel = await getRoleLevel(req.db, tokenCheck.data.rol);
+      // --- JERARQUÍA TEMPORALMENTE DESACTIVADA ---
+      // const userRoleLevel = await getRoleLevel(req.db, tokenCheck.data.rol);
       const targetRoleLevel = Number(level) || 10;
+      // if (targetRoleLevel > userRoleLevel) {
+      //    return res.status(403).json({ error: `No puedes asignar un nivel (${targetRoleLevel}) mayor a tu propia jerarquía (${userRoleLevel}).` });
+      // }
 
-      if (targetRoleLevel > userRoleLevel) {
-         return res.status(403).json({ error: `No puedes asignar un nivel (${targetRoleLevel}) mayor a tu propia jerarquía (${userRoleLevel}).` });
-      }
-
-      if (name && name.toLowerCase() === "maestro" && userRoleLevel < 100) {
-         return res.status(403).json({ error: "No puedes crear ni editar un rol con el nombre Maestro." });
-      }
+      // if (name && name.toLowerCase() === "maestro" && userRoleLevel < 100) {
+      //    return res.status(403).json({ error: "No puedes crear ni editar un rol con el nombre Maestro." });
+      // }
 
       const roleData = {
          name: name || "Nuevo Rol",
@@ -128,10 +129,10 @@ router.post("/", async (req, res) => {
          const currentCargoState = await req.db.collection("roles").findOne({ _id: new ObjectId(id) });
          if (!currentCargoState) return res.status(404).json({ error: "Rol no encontrado" });
 
-         const currentCargoLevel = await getRoleLevel(req.db, currentCargoState.name);
-         if (currentCargoLevel > userRoleLevel) {
-            return res.status(403).json({ error: "No tienes suficiente jerarquía para modificar este rol." });
-         }
+         // const currentCargoLevel = await getRoleLevel(req.db, currentCargoState.name);
+         // if (currentCargoLevel > userRoleLevel) {
+         //    return res.status(403).json({ error: "No tienes suficiente jerarquía para modificar este rol." });
+         // }
 
          const newCargoState = await req.db
             .collection("roles")
@@ -166,10 +167,8 @@ router.get("/config", async (req, res) => {
       const tokenCheck = await verifyRequest(req);
       if (!tokenCheck.ok) return res.status(401).json({ error: "Unauthorized" });
 
-      // Intentamos obtener la configuración desde la colección config_roles
-      const configRoles = await req.db.collection("config_roles").find({}).toArray();
-
-      res.json(configRoles);
+      // Retornamos directamente los grupos de permisos definidos en el archivo de configuración
+      res.json(PERMISSION_GROUPS);
    } catch (err) {
       console.error("Error en GET /roles/config:", err);
       res.status(500).json({ error: "Internal server error" });

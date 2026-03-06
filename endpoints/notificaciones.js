@@ -91,7 +91,6 @@ router.get("/gestion/agrupadas", async (req, res) => {
             $push: {
               _id: "$_id",
               nombre: "$nombre",
-              empresa: "$empresa",
               mail: "$mail",
               notiId: "$notificaciones.id",
               fecha: "$notificaciones.fecha_creacion"
@@ -111,7 +110,6 @@ router.get("/gestion/agrupadas", async (req, res) => {
           return {
             ...u,
             nombre: decrypt(u.nombre) || "Sin nombre",
-            empresa: decrypt(u.empresa) || "Sin empresa",
             mail: decrypt(u.mail) || "Sin email"
           };
         } catch (e) {

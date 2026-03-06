@@ -170,7 +170,7 @@ router.post('/', async (req, res) => {
                       </div>
                   </div>
                   `
-                },req);
+                }, req);
               }
             } catch (emailError) {
               console.error("Error enviando correo");
@@ -184,27 +184,23 @@ router.post('/', async (req, res) => {
     } else if (destinatarios.tipo === 'filtro') {
 
       const filtro = destinatarios.filtro || {};
-      
+
       // CAMBIO PERTINENTE: Filtrado en memoria para compatibilidad con datos cifrados
       const usuariosActivos = await db.collection("usuarios").find({ estado: 'activo' }).toArray();
-      const empsF = (filtro.empresas || []).map(e => e.trim().toLowerCase());
       const cargsF = (filtro.cargos || []).map(c => c.trim().toLowerCase());
       const rolsF = (filtro.roles || []).map(r => r.trim().toLowerCase());
 
       const usuariosDestinatarios = usuariosActivos.filter(u => {
         try {
-          let empD = (u.empresa && u.empresa.includes(':')) ? decrypt(u.empresa) : u.empresa;
           let carD = (u.cargo && u.cargo.includes(':')) ? decrypt(u.cargo) : u.cargo;
           let rolD = (u.rol || "").trim().toLowerCase();
 
-          empD = (empD || "").trim().toLowerCase();
           carD = (carD || "").trim().toLowerCase();
 
-          const matchEmp = empsF.length === 0 || empsF.includes(empD);
           const matchCar = cargsF.length === 0 || cargsF.includes(carD);
           const matchRol = rolsF.length === 0 || rolsF.includes(rolD);
 
-          return matchEmp && matchCar && matchRol;
+          return matchCar && matchRol;
         } catch (e) { return false; }
       });
 
@@ -236,7 +232,7 @@ router.post('/', async (req, res) => {
                 </div>`
               }, req);
             }
-          } catch (e) {}
+          } catch (e) { }
         }
         countFiltro++;
       }
@@ -284,7 +280,7 @@ router.post('/', async (req, res) => {
                   await sendEmail({
                     to: emailDecrypted,
                     subject: titulo,
-                    html:`
+                    html: `
                     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 40px 10px; text-align: center;">
                         <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center;">
                             
